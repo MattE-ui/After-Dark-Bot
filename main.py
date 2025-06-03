@@ -1,8 +1,10 @@
+
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 import os
 import asyncio
+import webserver
 
 load_dotenv()
 
@@ -17,13 +19,6 @@ intents.message_content = True
 intents.guilds = True
 intents.members = True
 
-debug_guilds = None
-if GUILD_ID:
-    try:
-        debug_guilds = [int(GUILD_ID)]
-    except ValueError:
-        print(f"Warning: Invalid GUILD_ID '{GUILD_ID}', syncing globally")
-
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 @bot.event
@@ -31,8 +26,14 @@ async def on_ready():
     print(f"{bot.user} is connected and ready!")
     print(f"Bot is in {len(bot.guilds)} guilds")
     try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} command(s)" if synced else "Commands synced successfully.")
+        if GUILD_ID:
+            guild = discord.Object(id=int(GUILD_ID))
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            print(f"Synced {len(synced)} command(s) to guild {GUILD_ID}")
+        else:
+            synced = await bot.tree.sync()
+            print(f"Synced {len(synced)} global command(s)")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
@@ -50,5 +51,7 @@ async def main():
         await load_cogs()
         await bot.start(TOKEN)
 
-# Run the bot using asyncio to support async cog loading
-asyncio.run(main())
+webserver.keep_alive()
+
+if __name__ == "__main__":
+    asyncio.run(main())

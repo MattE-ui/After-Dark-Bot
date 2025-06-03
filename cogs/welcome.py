@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
 from discord.utils import get
+from discord import app_commands
 import os
 
 welcome_enabled = False  # toggle flag
@@ -75,33 +76,31 @@ class Welcome(commands.Cog):
             if fallback_channel:
                 await fallback_channel.send(message, view=view)
 
-    @commands.slash_command(name="toggle_welcome", description="(Developer Only) Toggle welcome messages.")
-    async def toggle_welcome(self, ctx):
-        # Get developer ID from environment variable
+    #@app_commands.command(name="toggle_welcome", description="(Developer Only) Toggle welcome messages.")
+    async def toggle_welcome(self, interaction: discord.Interaction):
         developer_id = os.getenv("DEVELOPER_ID")
-        if not developer_id or str(ctx.author.id) != developer_id:
-            await ctx.respond("❌ This command is restricted to the bot developer.", ephemeral=True)
+        if not developer_id or str(interaction.user.id) != developer_id:
+            await interaction.response.send_message("❌ This command is restricted to the bot developer.", ephemeral=True)
             return
 
         global welcome_enabled
         welcome_enabled = not welcome_enabled
         state = "enabled" if welcome_enabled else "disabled"
-        await ctx.respond(f"✅ Welcome messages are now **{state}**.")
+        await interaction.response.send_message(f"✅ Welcome messages are now **{state}**.", ephemeral=True)
 
-    @commands.slash_command(name="test_welcome", description="(Developer Only) Test welcome flow.")
-    async def test_welcome(self, ctx):
-        # Get developer ID from environment variable
+    @app_commands.command(name="test_welcome", description="(Developer Only) Test welcome flow.")
+    async def test_welcome(self, interaction: discord.Interaction):
         developer_id = os.getenv("DEVELOPER_ID")
-        if not developer_id or str(ctx.author.id) != developer_id:
-            await ctx.respond("❌ This command is restricted to the bot developer.", ephemeral=True)
+        if not developer_id or str(interaction.user.id) != developer_id:
+            await interaction.response.send_message("❌ This command is restricted to the bot developer.", ephemeral=True)
             return
 
-        view = GameRoleSelection(ctx.author.id)
-        await ctx.respond(
-            f"🎉 Welcome to the server, {ctx.author.mention}!\n\nSelect your game below:",
+        view = GameRoleSelection(interaction.user.id)
+        await interaction.response.send_message(
+            f"🎉 Welcome to the server, {interaction.user.mention}!\n\nSelect your game below:",
             view=view,
             ephemeral=True
         )
 
-def setup(bot):
-    bot.add_cog(Welcome(bot))
+async def setup(bot):
+    await bot.add_cog(Welcome(bot))
