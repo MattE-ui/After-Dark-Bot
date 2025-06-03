@@ -198,7 +198,7 @@ class RedditMirror(commands.Cog):
 
             await submission.load()
 
-            if submission.score < 30:
+            if submission.score < 20:
                 continue
 
             if await self.is_already_sent(channel, submission.title):
@@ -211,7 +211,7 @@ class RedditMirror(commands.Cog):
     async def before_mirror_posts(self):
         await self.bot.wait_until_ready()
 
-    @app_commands.command(name="reddit_latest", description="Post the newest r/duneawakening entry (≥30 upvotes).")
+    @app_commands.command(name="reddit_latest", description="Post the newest r/duneawakening entry (≥20 upvotes).")
     async def reddit_latest(self, interaction: Interaction):
         try:
             subreddit = await self.reddit.subreddit(self.subreddit_name)
@@ -219,13 +219,13 @@ class RedditMirror(commands.Cog):
 
             async for post in subreddit.new(limit=10):
                 await post.load()
-                if post.score >= 30:
+                if post.score >= 20:
                     found_submission = post
                     break
 
             if not found_submission:
                 await interaction.response.send_message(
-                    "⚠️ Could not find any recent post with at least 30 upvotes.",
+                    "⚠️ Could not find any recent post with at least 20 upvotes.",
                     ephemeral=False
                 )
                 return

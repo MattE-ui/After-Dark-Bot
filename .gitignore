@@ -1,5 +1,6 @@
 .env
 __pycache__/
 config.json
+counting_stats.json
 *.pyc
 *.log

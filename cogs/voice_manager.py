@@ -1,19 +1,16 @@
 
 import discord
 from discord.ext import commands, tasks
+import asyncio
 import time
 
-# Name of the voice channel users join to create their own
 CREATE_VC_CHANNEL_NAME = "₊ Join to Create"
-
-# Number of seconds a channel must stay empty before deletion
-EMPTY_TIMEOUT = 120  # 2 minutes
+CHANNEL_TIMEOUT_SECONDS = 5  # delete after 5s of being empty
 
 class VoiceManager(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Tracks temporary channels: channel_id -> timestamp_when_empty
-        self.temp_channels = {}
+        self.temp_channels = {}  # {channel_id: timestamp_when_emptied}
         self.cleanup_task.start()
 
     def cog_unload(self):
@@ -21,55 +18,53 @@ class VoiceManager(commands.Cog):
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
-        # If user joined the create channel
         if after.channel and after.channel.name == CREATE_VC_CHANNEL_NAME:
-            guild = member.guild
-            parent = after.channel.category
-            new_channel_name = f"{member.display_name}'s Channel"
-            # Overwrites: everyone can connect, but owner has manage permissions
-            overwrites = {
-                guild.default_role: discord.PermissionOverwrite(connect=True),
-                member: discord.PermissionOverwrite(manage_channels=True, manage_permissions=True, connect=True)
-            }
-            new_channel = await guild.create_voice_channel(
-                name=new_channel_name,
-                overwrites=overwrites,
-                category=parent
+            category = after.channel.category
+            channel_name = f"{member.display_name}'s Channel"
+
+            # Check if user's personal channel already exists
+            existing_channel = discord.utils.get(category.voice_channels, name=channel_name)
+            if existing_channel:
+                await member.move_to(existing_channel)
+                return
+
+            # Create a new voice channel
+            new_channel = await category.create_voice_channel(
+                name=channel_name,
+                overwrites={
+                    member.guild.default_role: discord.PermissionOverwrite(connect=True, view_channel=True),
+                    member: discord.PermissionOverwrite(manage_channels=True, connect=True, view_channel=True)
+                }
             )
             await member.move_to(new_channel)
-            self.temp_channels[new_channel.id] = None
 
-        # If user left a temp channel
-        if before.channel and before.channel.id in self.temp_channels:
+        # Track when a temp VC becomes empty
+        if before.channel and before.channel.name.endswith("'s Channel"):
             if len(before.channel.members) == 0:
-                if self.temp_channels[before.channel.id] is None:
-                    self.temp_channels[before.channel.id] = time.time()
+                self.temp_channels[before.channel.id] = time.time()
             else:
-                self.temp_channels[before.channel.id] = None
+                self.temp_channels.pop(before.channel.id, None)
 
-    @tasks.loop(seconds=60.0)
+        # Cancel deletion if someone joins the tracked channel
+        if after.channel and after.channel.name.endswith("'s Channel"):
+            self.temp_channels.pop(after.channel.id, None)
+
+    @tasks.loop(seconds=30)
     async def cleanup_task(self):
-        to_remove = []
-        for chan_id, empty_since in list(self.temp_channels.items()):
-            channel = self.bot.get_channel(chan_id)
-            if channel is None:
-                to_remove.append(chan_id)
-                continue
-            if len(channel.members) == 0:
-                if empty_since is None:
-                    self.temp_channels[chan_id] = time.time()
-                else:
-                    if time.time() - empty_since >= EMPTY_TIMEOUT:
-                        try:
-                            await channel.delete()
-                        except Exception:
-                            pass
-                        to_remove.append(chan_id)
-            else:
-                self.temp_channels[chan_id] = None
-
-        for rid in to_remove:
-            del self.temp_channels[rid]
+        now = time.time()
+        to_delete = []
+        for channel_id, empty_since in self.temp_channels.items():
+            if now - empty_since >= CHANNEL_TIMEOUT_SECONDS:
+                channel = self.bot.get_channel(channel_id)
+                if channel and len(channel.members) == 0:
+                    try:
+                        await channel.delete(reason="Temporary VC expired")
+                        to_delete.append(channel_id)
+                    except Exception as e:
+                        print(f"Failed to delete channel {channel_id}: {e}")
+                        to_delete.append(channel_id)
+        for cid in to_delete:
+            self.temp_channels.pop(cid, None)
 
     @cleanup_task.before_loop
     async def before_cleanup(self):
