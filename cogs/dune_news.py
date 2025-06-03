@@ -9,6 +9,7 @@ from discord.ext import commands
 import requests
 from bs4 import BeautifulSoup, NavigableString
 
+# Re‐use our existing ReadMoreView from before (same as original)
 class ReadMoreView(discord.ui.View):
     def __init__(self, url: str):
         super().__init__(timeout=None)
@@ -18,9 +19,9 @@ class ReadMoreView(discord.ui.View):
 
 class News(commands.Cog):
     USER_AGENT = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        " AppleWebKit/537.36 (KHTML, like Gecko)"
+        " Chrome/124.0.0.0 Safari/537.36"
     )
 
     NOISE_TERMS = {
@@ -42,6 +43,7 @@ class News(commands.Cog):
         headers = {"User-Agent": self.USER_AGENT}
 
         try:
+            # Run requests.get in executor to avoid blocking
             response = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: requests.get(url, headers=headers, timeout=10)
             )
@@ -52,6 +54,8 @@ class News(commands.Cog):
             return None, f"Failed to fetch news (status {response.status_code})"
 
         soup = BeautifulSoup(response.text, "html.parser")
+
+        # Try multiple known selectors, fallback if none match
         selectors = [
             "a.article-card_link__XGiVr",
             ".article-card a",
@@ -63,12 +67,14 @@ class News(commands.Cog):
             if articles:
                 return articles, None
 
+        # Fallback: brute‐force scan for <a> with '/en/news/'
         articles = [
             a for a in soup.find_all("a", href=True)
             if "/en/news/" in a["href"] and len(a.get_text(strip=True)) > 10
         ]
         if not articles:
             return None, "No news articles found."
+
         return articles, None
 
     async def fetch_article_content(self, url: str):
@@ -89,7 +95,7 @@ class News(commands.Cog):
         # Extract title
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "News Update"
 
-        # Extract publish date
+        # Extract publish date (if available in <time datetime="">)
         publish_date = datetime.utcnow()
         date_tag = soup.find("time")
         if date_tag and date_tag.has_attr("datetime"):
@@ -98,11 +104,11 @@ class News(commands.Cog):
             except Exception:
                 pass
 
-        # Extract image
+        # Extract og:image (if present)
         image_meta = soup.find("meta", property="og:image")
         image_url = image_meta["content"] if image_meta else None
 
-        # Parse the body
+        # Parse the page’s <body> for paragraphs, headings, list items
         body = soup.find("body")
         if not body:
             return title, "Content not available.", image_url, publish_date, None
@@ -124,40 +130,33 @@ class News(commands.Cog):
             else:
                 lines.append(text)
 
-            lines.append("")  # spacing
+            lines.append("")  # Blank line for spacing
 
-        content = "\n".join(lines).strip()
-        content = re.sub(r"\n{3,}", "\n\n", content)
+        content = "\n".join(lines)
+        content = re.sub(r"\n{3,}", "\n\n", content).strip()
 
         return title, content, image_url, publish_date, None
 
-    @app_commands.command(
-        name="dune_news",
-        description="Get the latest Dune: Awakening headline in full."
-    )
+    @app_commands.command(name="dune_news", description="Get the latest Dune: Awakening headline in full.")
     async def dune_news_slash(self, interaction: discord.Interaction):
         await interaction.response.defer()
         await self._send_latest_article(interaction, is_slash=True)
 
-    @app_commands.command(
-        name="latest_dune_news",
-        description="Alias for /dune_news."
-    )
+    @app_commands.command(name="latest_dune_news", description="Alias for /dune_news.")
     async def latest_dune_news(self, interaction: discord.Interaction):
         await interaction.response.defer()
         await self._send_latest_article(interaction, is_slash=True)
 
-    @app_commands.command(
-        name="dune_news_summary",
-        description="Summaries of the three most recent posts."
-    )
+    @app_commands.command(name="dune_news_summary", description="Summaries of the three most recent posts.")
     async def dune_news_summary(self, interaction: discord.Interaction):
         await interaction.response.defer()
+
         articles, error = await self.fetch_dune_news()
         if error or not articles:
             await interaction.followup.send(f"❌ {error or 'No articles found.'}")
             return
 
+        # Send header embed
         header = discord.Embed(
             title="Dune: Awakening — Recent News",
             description=f"Here are the latest **{min(3, len(articles))}** posts:",
@@ -166,6 +165,7 @@ class News(commands.Cog):
         )
         await interaction.followup.send(embed=header)
 
+        # Loop through top 3 articles
         for idx, article in enumerate(articles[:3], start=1):
             href = article.get("href", "")
             url = f"https://www.duneawakening.com{href}" if href.startswith("/") else href
@@ -175,7 +175,6 @@ class News(commands.Cog):
                 continue
 
             summary = " ".join(content.split()[:90]) + "…"
-
             embed = discord.Embed(
                 title=title,
                 description=summary,
@@ -187,7 +186,7 @@ class News(commands.Cog):
                 embed.set_thumbnail(url=img)
             embed.set_footer(text=f"Summary {idx} of {len(articles)}")
             await interaction.followup.send(embed=embed, view=ReadMoreView(url))
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(1.0)  # slight delay to avoid spamming
 
     @commands.command(name="dune_news")
     async def dune_news_text(self, ctx: commands.Context):
@@ -210,7 +209,6 @@ class News(commands.Cog):
             return
 
         description = (content[:1800] + "…") if len(content) > 1800 else content
-
         embed = discord.Embed(
             title=title,
             description=description,
@@ -223,15 +221,7 @@ class News(commands.Cog):
         embed.set_footer(text="Dune: Awakening News")
         await send(embed=embed, view=ReadMoreView(url))
 
-    async def cog_load(self):
-        guild_id = os.getenv("GUILD_ID")
-        if guild_id:
-            guild_obj = discord.Object(id=int(guild_id))
-            # Register commands if not already
-            names = [cmd.name for cmd in self.bot.tree.get_commands(guild=guild_obj)]
-            for cmd in ["dune_news", "latest_dune_news", "dune_news_summary"]:
-                if cmd not in names:
-                    self.bot.tree.add_command(getattr(self, cmd + "_slash"), guild=guild_obj)
+    # Removed the old broken cog_load; slash commands are auto‐registered via decorator.
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(News(bot))
