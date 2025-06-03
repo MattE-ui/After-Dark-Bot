@@ -1,4 +1,3 @@
-
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -9,7 +8,7 @@ import webserver
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = os.getenv("GUILD_ID")
+GUILD_ID = os.getenv("GUILD_ID")  # e.g. "1378789064274350193"
 
 if not TOKEN:
     raise ValueError("DISCORD_TOKEN is missing in the .env file.")
@@ -23,10 +22,16 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 @bot.event
 async def on_ready():
+    """
+    Once the bot is ready, sync all slash commands to the guild (if provided),
+    or globally if GUILD_ID is None.
+    """
     print(f"{bot.user} is connected and ready!")
-    print(f"Bot is in {len(bot.guilds)} guilds")
+    print(f"Bot is in {len(bot.guilds)} guild(s)")
+
     try:
         if GUILD_ID:
+            # Copy global commands to the guild and sync
             guild = discord.Object(id=int(GUILD_ID))
             bot.tree.copy_global_to(guild=guild)
             synced = await bot.tree.sync(guild=guild)
@@ -37,22 +42,33 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
-COG_EXCLUDES = {"config_store.py", "stats_store.py", "__init__.py"}
-
 async def load_cogs():
+    """
+    Load each .py file in cogs/, skipping helper modules that are NOT true cogs:
+    - config_store.py
+    - stats_store.py
+    - __init__.py
+    """
+    COG_EXCLUDES = {"config_store.py", "stats_store.py", "__init__.py"}
     for filename in os.listdir("./cogs"):
-        if filename.endswith(".py") and filename not in COG_EXCLUDES:
-            try:
-                await bot.load_extension(f"cogs.{filename[:-3]}")
-                print(f"Loaded cog: cogs.{filename[:-3]}")
-            except Exception as e:
-                print(f"Failed to load cog {filename}: {e}")
+        if not filename.endswith(".py"):
+            continue
+        if filename in COG_EXCLUDES:
+            continue
+
+        cog_name = filename[:-3]  # e.g. "counting_game"
+        try:
+            await bot.load_extension(f"cogs.{cog_name}")
+            print(f"Loaded cog: cogs.{cog_name}")
+        except Exception as e:
+            print(f"Failed to load cog {filename}: {e}")
 
 async def main():
     async with bot:
         await load_cogs()
         await bot.start(TOKEN)
 
+# Start the tiny Flask server to keep the bot alive (e.g. on Render/Replit)
 webserver.keep_alive()
 
 if __name__ == "__main__":

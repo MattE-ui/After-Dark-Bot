@@ -8,25 +8,18 @@ from discord.ext import commands
 import requests
 from bs4 import BeautifulSoup, NavigableString
 
-
 class ReadMoreView(discord.ui.View):
     def __init__(self, url: str):
         super().__init__(timeout=None)
         self.add_item(
-            discord.ui.Button(
-                label="Read More",
-                style=discord.ButtonStyle.link,
-                url=url,
-                emoji="📖",
-            )
+            discord.ui.Button(label="Read More", style=discord.ButtonStyle.link, url=url, emoji="📖")
         )
-
 
 class News(commands.Cog):
     USER_AGENT = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        " AppleWebKit/537.36 (KHTML, like Gecko)"
-        " Chrome/124.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
     )
 
     NOISE_TERMS = {
@@ -108,7 +101,7 @@ class News(commands.Cog):
         image_meta = soup.find("meta", property="og:image")
         image_url = image_meta["content"] if image_meta else None
 
-        # ✅ Original working approach: parse whole <body> and pick up readable tags
+        # Parse the body
         body = soup.find("body")
         if not body:
             return title, "Content not available.", image_url, publish_date, None
@@ -130,27 +123,35 @@ class News(commands.Cog):
             else:
                 lines.append(text)
 
-            lines.append("")  # Add blank line for spacing
+            lines.append("")  # spacing
 
-        content = "\n".join(lines)
-        content = re.sub(r"\n{3,}", "\n\n", content).strip()
+        content = "\n".join(lines).strip()
+        content = re.sub(r"\n{3,}", "\n\n", content)
 
         return title, content, image_url, publish_date, None
 
-    @app_commands.command(name="dune_news", description="Get the latest Dune: Awakening headline in full.")
+    @app_commands.command(
+        name="dune_news",
+        description="Get the latest Dune: Awakening headline in full."
+    )
     async def dune_news_slash(self, interaction: discord.Interaction):
         await interaction.response.defer()
         await self._send_latest_article(interaction, is_slash=True)
 
-    @app_commands.command(name="latest_dune_news", description="Alias for /dune_news.")
+    @app_commands.command(
+        name="latest_dune_news",
+        description="Alias for /dune_news."
+    )
     async def latest_dune_news(self, interaction: discord.Interaction):
         await interaction.response.defer()
         await self._send_latest_article(interaction, is_slash=True)
 
-    @app_commands.command(name="dune_news_summary", description="Summaries of the three most recent posts.")
+    @app_commands.command(
+        name="dune_news_summary",
+        description="Summaries of the three most recent posts."
+    )
     async def dune_news_summary(self, interaction: discord.Interaction):
         await interaction.response.defer()
-
         articles, error = await self.fetch_dune_news()
         if error or not articles:
             await interaction.followup.send(f"❌ {error or 'No articles found.'}")
@@ -221,6 +222,15 @@ class News(commands.Cog):
         embed.set_footer(text="Dune: Awakening News")
         await send(embed=embed, view=ReadMoreView(url))
 
+    async def cog_load(self):
+        guild_id = os.getenv("GUILD_ID")
+        if guild_id:
+            guild_obj = discord.Object(id=int(guild_id))
+            # Register commands if not already
+            names = [cmd.name for cmd in self.bot.tree.get_commands(guild=guild_obj)]
+            for cmd in ["dune_news", "latest_dune_news", "dune_news_summary"]:
+                if cmd not in names:
+                    self.bot.tree.add_command(getattr(self, cmd + "_slash"), guild=guild_obj)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(News(bot))

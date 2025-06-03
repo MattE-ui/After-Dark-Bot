@@ -1,16 +1,15 @@
-
 import discord
 from discord.ext import commands, tasks
 import asyncio
 import time
 
 CREATE_VC_CHANNEL_NAME = "₊ Join to Create"
-CHANNEL_TIMEOUT_SECONDS = 5  # delete after 5s of being empty
+CHANNEL_TIMEOUT_SECONDS = 60  # Delete after 60 seconds of being empty
 
 class VoiceManager(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.temp_channels = {}  # {channel_id: timestamp_when_emptied}
+        self.temp_channels = {}  # channel_id → timestamp when it became empty
         self.cleanup_task.start()
 
     def cog_unload(self):
@@ -18,17 +17,18 @@ class VoiceManager(commands.Cog):
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
+        # If user joined the "join to create" channel, make a new personal VC
         if after.channel and after.channel.name == CREATE_VC_CHANNEL_NAME:
             category = after.channel.category
             channel_name = f"{member.display_name}'s Channel"
 
-            # Check if user's personal channel already exists
-            existing_channel = discord.utils.get(category.voice_channels, name=channel_name)
-            if existing_channel:
-                await member.move_to(existing_channel)
+            # If user’s channel already exists, move them there
+            existing = discord.utils.get(category.voice_channels, name=channel_name)
+            if existing:
+                await member.move_to(existing)
                 return
 
-            # Create a new voice channel
+            # Otherwise, create a new voice channel
             new_channel = await category.create_voice_channel(
                 name=channel_name,
                 overwrites={
@@ -43,9 +43,10 @@ class VoiceManager(commands.Cog):
             if len(before.channel.members) == 0:
                 self.temp_channels[before.channel.id] = time.time()
             else:
+                # Someone rejoined, cancel deletion
                 self.temp_channels.pop(before.channel.id, None)
 
-        # Cancel deletion if someone joins the tracked channel
+        # If a user joins a tracked channel, cancel deletion
         if after.channel and after.channel.name.endswith("'s Channel"):
             self.temp_channels.pop(after.channel.id, None)
 
@@ -70,5 +71,5 @@ class VoiceManager(commands.Cog):
     async def before_cleanup(self):
         await self.bot.wait_until_ready()
 
-async def setup(bot):
+async def setup(bot: commands.Bot):
     await bot.add_cog(VoiceManager(bot))

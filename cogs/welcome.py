@@ -3,8 +3,7 @@ from discord.ext import commands
 from discord.utils import get
 from discord import app_commands
 import os
-
-welcome_enabled = False  # toggle flag
+from cogs.config_store import get_setting, set_setting
 
 class GameRoleSelection(discord.ui.View):
     def __init__(self, user_id):
@@ -57,9 +56,10 @@ class Welcome(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_join(self, member):
-        global welcome_enabled
+        # Check if welcome is enabled in settings
+        welcome_enabled = bool(int(get_setting("welcome_enabled", 0)))
         if not welcome_enabled:
-            print(f"Welcome disabled. {member.display_name} joined.")
+            print(f"Welcome is disabled. Skipping DM to {member.display_name}.")
             return
 
         message = (
@@ -70,29 +70,38 @@ class Welcome(commands.Cog):
         try:
             await member.send(message, view=view)
         except discord.Forbidden:
-            fallback_channel = get(member.guild.text_channels, name="﹐chat") or \
-                               get(member.guild.text_channels, name="welcome") or \
-                               member.guild.text_channels[0]
-            if fallback_channel:
-                await fallback_channel.send(message, view=view)
+            fallback = (
+                get(member.guild.text_channels, name="﹐chat") or
+                get(member.guild.text_channels, name="welcome") or
+                member.guild.text_channels[0]
+            )
+            if fallback:
+                await fallback.send(message, view=view)
 
-    #@app_commands.command(name="toggle_welcome", description="(Developer Only) Toggle welcome messages.")
+    @app_commands.command(
+        name="toggle_welcome",
+        description="(Developer Only) Enable or disable welcome DMs."
+    )
     async def toggle_welcome(self, interaction: discord.Interaction):
         developer_id = os.getenv("DEVELOPER_ID")
         if not developer_id or str(interaction.user.id) != developer_id:
-            await interaction.response.send_message("❌ This command is restricted to the bot developer.", ephemeral=True)
+            await interaction.response.send_message("❌ Developer only.", ephemeral=True)
             return
 
-        global welcome_enabled
-        welcome_enabled = not welcome_enabled
-        state = "enabled" if welcome_enabled else "disabled"
+        current = bool(int(get_setting("welcome_enabled", 0)))
+        new_val = int(not current)
+        set_setting("welcome_enabled", new_val)
+        state = "enabled" if not current else "disabled"
         await interaction.response.send_message(f"✅ Welcome messages are now **{state}**.", ephemeral=True)
 
-    @app_commands.command(name="test_welcome", description="(Developer Only) Test welcome flow.")
+    @app_commands.command(
+        name="test_welcome",
+        description="(Developer Only) Test the welcome DM flow."
+    )
     async def test_welcome(self, interaction: discord.Interaction):
         developer_id = os.getenv("DEVELOPER_ID")
         if not developer_id or str(interaction.user.id) != developer_id:
-            await interaction.response.send_message("❌ This command is restricted to the bot developer.", ephemeral=True)
+            await interaction.response.send_message("❌ Developer only.", ephemeral=True)
             return
 
         view = GameRoleSelection(interaction.user.id)
@@ -102,5 +111,18 @@ class Welcome(commands.Cog):
             ephemeral=True
         )
 
-async def setup(bot):
+    async def cog_load(self):
+        """
+        Ensure toggle_welcome & test_welcome are registered to the guild only once.
+        """
+        guild_id = os.getenv("GUILD_ID")
+        if guild_id:
+            guild_obj = discord.Object(id=int(guild_id))
+            names = [cmd.name for cmd in self.bot.tree.get_commands(guild=guild_obj)]
+            if "toggle_welcome" not in names:
+                self.bot.tree.add_command(self.toggle_welcome, guild=guild_obj)
+            if "test_welcome" not in names:
+                self.bot.tree.add_command(self.test_welcome, guild=guild_obj)
+
+async def setup(bot: commands.Bot):
     await bot.add_cog(Welcome(bot))

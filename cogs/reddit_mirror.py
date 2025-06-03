@@ -2,39 +2,9 @@ import discord
 from discord.ext import commands, tasks
 import asyncpraw
 import os
-import json
-from dotenv import load_dotenv
 from discord import app_commands, Interaction
-
-load_dotenv()
-CONFIG_PATH = "config.json"
-
-def _load_config() -> dict:
-    """
-    Load the JSON config file. Assume defaults if missing.
-    """
-    defaults = {
-        "welcome_enabled": False,
-        "reddit_enabled": True,
-        "reddit_channel_id": None
-    }
-    if not os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH, "w") as f:
-            json.dump(defaults, f, indent=4)
-        return defaults
-
-    with open(CONFIG_PATH, "r") as f:
-        try:
-            data = json.load(f)
-        except json.JSONDecodeError:
-            data = defaults
-
-    # Fill in any missing keys
-    for key, val in defaults.items():
-        if key not in data:
-            data[key] = val
-
-    return data
+from cogs.config_store import init_settings, get_setting
+from cogs.stats_store import init_stats
 
 class ImagePaginator(discord.ui.View):
     def __init__(self, base_embed: discord.Embed, image_urls: list, timeout: int = 120):
@@ -46,7 +16,6 @@ class ImagePaginator(discord.ui.View):
         self.update_buttons()
 
     def update_buttons(self):
-        # Disable prev if at first, next if at last
         self.prev_button.disabled = (self.current_index == 0)
         self.next_button.disabled = (self.current_index == self.total - 1)
 
@@ -71,6 +40,9 @@ class ImagePaginator(discord.ui.View):
 class RedditMirror(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        init_settings()
+        init_stats()
+
         self.reddit = asyncpraw.Reddit(
             client_id=os.getenv("REDDIT_CLIENT_ID"),
             client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
@@ -81,17 +53,13 @@ class RedditMirror(commands.Cog):
         self.subreddit_name = os.getenv("REDDIT_SUBREDDIT", "duneawakening")
         self.posted_ids = set()
 
-        # Start the auto‐loop
+        # Start the background loop
         self.mirror_posts.start()
 
     def cog_unload(self):
         self.mirror_posts.cancel()
 
     async def is_already_sent(self, channel: discord.TextChannel, title: str) -> bool:
-        """
-        Scan the last 200 messages in 'channel' for an embed with same title.
-        Return True if found.
-        """
         async for message in channel.history(limit=200):
             if message.embeds:
                 for embed in message.embeds:
@@ -105,7 +73,7 @@ class RedditMirror(commands.Cog):
         """
         urls = []
 
-        # 1) gallery
+        # 1) Gallery
         if getattr(submission, "is_gallery", False) and hasattr(submission, "media_metadata"):
             try:
                 for item in submission.media_metadata.values():
@@ -114,7 +82,7 @@ class RedditMirror(commands.Cog):
             except Exception:
                 pass
 
-        # 2) preview images
+        # 2) Preview images
         elif getattr(submission, "preview", None):
             try:
                 for image in submission.preview.get("images", []):
@@ -124,17 +92,13 @@ class RedditMirror(commands.Cog):
             except Exception:
                 pass
 
-        # 3) fallback if direct image
+        # 3) Fallback for single‐image posts
         elif getattr(submission, "post_hint", None) == "image" and submission.url.endswith((".jpg", ".jpeg", ".png", ".gif")):
             urls.append(submission.url)
 
         return urls
 
     async def send_embed_with_images(self, channel: discord.TextChannel, submission, interaction: Interaction = None):
-        """
-        Build+send an embed for 'submission'. If multiple images, attach a paginator.
-        If 'interaction' is provided, respond/followup on it; otherwise do a plain send().
-        """
         embed = discord.Embed(
             title=submission.title,
             url=f"https://reddit.com{submission.permalink}",
@@ -147,25 +111,22 @@ class RedditMirror(commands.Cog):
         image_urls = self.extract_image_urls(submission)
 
         if image_urls:
-            # If more than one image, use paginator
             if len(image_urls) > 1:
                 embed.set_image(url=image_urls[0])
                 view = ImagePaginator(embed, image_urls)
                 if interaction:
-                    # Defer + followup if invoked via slash
                     await interaction.response.defer()
                     await interaction.followup.send(embed=embed, view=view)
                 else:
                     await channel.send(embed=embed, view=view)
             else:
-                # Single image
                 embed.set_image(url=image_urls[0])
                 if interaction:
                     await interaction.response.send_message(embed=embed)
                 else:
                     await channel.send(embed=embed)
         else:
-            # No images at all
+            # No images
             if interaction:
                 await interaction.response.send_message(embed=embed)
             else:
@@ -175,19 +136,17 @@ class RedditMirror(commands.Cog):
     async def mirror_posts(self):
         await self.bot.wait_until_ready()
 
-        # Re‐load config on each loop
-        config = _load_config()
-        if not config.get("reddit_enabled", True):
-            return  # Auto‐mirror disabled
-
-        channel_id = config.get("reddit_channel_id")
-        if not channel_id:
-            # Destination not set; nothing to do
+        config_enabled = bool(int(get_setting("reddit_enabled", 1)))
+        if not config_enabled:
             return
 
-        channel = self.bot.get_channel(int(channel_id))
+        channel_id = int(get_setting("reddit_channel_id", 0) or 0)
+        if channel_id == 0:
+            return  # No channel set
+
+        channel = self.bot.get_channel(channel_id)
         if not channel:
-            print(f"❌ Could not find channel with ID {channel_id}")
+            print(f"❌ Could not find Reddit channel ID {channel_id}")
             return
 
         subreddit = await self.reddit.subreddit(self.subreddit_name)
@@ -197,7 +156,6 @@ class RedditMirror(commands.Cog):
                 continue
 
             await submission.load()
-
             if submission.score < 20:
                 continue
 
@@ -211,43 +169,46 @@ class RedditMirror(commands.Cog):
     async def before_mirror_posts(self):
         await self.bot.wait_until_ready()
 
-    @app_commands.command(name="reddit_latest", description="Post the newest r/duneawakening entry (≥20 upvotes).")
-    async def reddit_latest(self, interaction: Interaction):
+    @app_commands.command(
+        name="reddit_latest",
+        description="Fetch the newest r/duneawakening post (≥20 upvotes)."
+    )
+    async def reddit_latest(self, interaction: discord.Interaction):
         try:
             subreddit = await self.reddit.subreddit(self.subreddit_name)
-            found_submission = None
-
+            found = None
             async for post in subreddit.new(limit=10):
                 await post.load()
                 if post.score >= 20:
-                    found_submission = post
+                    found = post
                     break
 
-            if not found_submission:
+            if not found:
                 await interaction.response.send_message(
-                    "⚠️ Could not find any recent post with at least 20 upvotes.",
+                    "⚠️ No recent post with at least 20 upvotes found.",
                     ephemeral=False
                 )
                 return
 
-            # **Important**: We do NOT check for duplicates here, so /reddit_latest always shows you latest.
-            await self.send_embed_with_images(interaction.channel, found_submission, interaction=interaction)
+            await self.send_embed_with_images(interaction.channel, found, interaction=interaction)
 
         except Exception as e:
-            # If “thinking” wasn’t sent yet, use response.send_message
             if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ An error occurred: `{e}`")
+                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
             else:
-                await interaction.followup.send(f"❌ An error occurred: `{e}`")
+                await interaction.followup.send(f"❌ Error: `{e}`")
             raise
 
     async def cog_load(self):
+        """
+        Ensure slash command is registered to the guild on load.
+        """
         guild_id = os.getenv("GUILD_ID")
         if guild_id:
             guild_obj = discord.Object(id=int(guild_id))
-            # Register /reddit_latest if not already there
+            # If /reddit_latest isn't already in this guild, add it
             if not any(cmd.name == "reddit_latest" for cmd in self.bot.tree.get_commands(guild=guild_obj)):
                 self.bot.tree.add_command(self.reddit_latest, guild=guild_obj)
 
-async def setup(bot):
+async def setup(bot: commands.Bot):
     await bot.add_cog(RedditMirror(bot))
