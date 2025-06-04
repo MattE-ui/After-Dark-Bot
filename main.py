@@ -5,6 +5,8 @@ import logging
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+from database.stats_store import init_stats_db
+init_stats_db()
 
 load_dotenv()
 
