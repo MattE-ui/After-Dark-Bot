@@ -15,6 +15,12 @@ def init_stats_db():
             PRIMARY KEY (user_id, stat)
         )
     ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS global_stats (
+            key TEXT PRIMARY KEY,
+            value INTEGER
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -53,3 +59,22 @@ def get_top_users(stat: str, limit: int = 10):
     results = c.fetchall()
     conn.close()
     return results
+
+def set_global_stat(key: str, value: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO global_stats (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    ''', (key, value))
+    conn.commit()
+    conn.close()
+
+def get_global_stat(key: str) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT value FROM global_stats WHERE key = ?', (key,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else 0

@@ -5,7 +5,7 @@ from discord.ext import commands
 from discord import app_commands
 
 from database.config_store import get_config, set_config
-from database.stats_store import get_user_stat, increment_user_stat
+from database.stats_store import get_user_stat, increment_user_stat, set_global_stat
 
 class CountingGame(commands.Cog):
     def __init__(self, bot):
@@ -89,6 +89,19 @@ class CountingGame(commands.Cog):
     async def counting_stats(self, interaction: discord.Interaction):
         score = get_user_stat(interaction.user.id, "counting_score")
         await interaction.response.send_message(f"🧮 {interaction.user.mention}, your counting score is `{score}`!")
+
+    @app_commands.command(
+    name="set_count",
+    description="(ADMIN ONLY) Manually set the current counting number."
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(value="The number to set as the current count")
+    async def set_count(self, interaction: discord.Interaction, value: int):
+        if value < 0:
+            return await interaction.response.send_message("❌ Count must be 0 or higher.")
+
+        set_global_stat("counting_current", value)
+        await interaction.response.send_message(f"✅ The count has been set to `{value}`. Continue counting from here!")
 
 async def setup(bot):
     await bot.add_cog(CountingGame(bot))
