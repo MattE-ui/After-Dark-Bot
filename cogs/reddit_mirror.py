@@ -1,214 +1,189 @@
+# cogs/reddit_mirror.py
+
 import discord
 from discord.ext import commands, tasks
-import asyncpraw
+import praw
 import os
-from discord import app_commands, Interaction
-from cogs.config_store import init_settings, get_setting
-from cogs.stats_store import init_stats
+from dotenv import load_dotenv
 
-class ImagePaginator(discord.ui.View):
-    def __init__(self, base_embed: discord.Embed, image_urls: list, timeout: int = 120):
-        super().__init__(timeout=timeout)
-        self.base_embed = base_embed
-        self.image_urls = image_urls
-        self.current_index = 0
-        self.total = len(image_urls)
-        self.update_buttons()
+from discord import app_commands
+from database.config_store import get_config, set_config
 
-    def update_buttons(self):
-        self.prev_button.disabled = (self.current_index == 0)
-        self.next_button.disabled = (self.current_index == self.total - 1)
+load_dotenv()
 
-    @discord.ui.button(label="◀️", style=discord.ButtonStyle.secondary, custom_id="prev_image")
+
+class RedditGalleryView(discord.ui.View):
+    def __init__(self, images: list[str], embed: discord.Embed, author_tag: str):
+        super().__init__(timeout=60)
+        self.images = images
+        self.index = 0
+        self.embed = embed
+        self.author_tag = author_tag
+        self.update_embed()
+
+    def update_embed(self):
+        self.embed.set_image(url=self.images[self.index])
+        self.embed.set_footer(text=f"{self.author_tag} • Image {self.index + 1} of {len(self.images)}")
+
+    @discord.ui.button(label="◀️ Prev", style=discord.ButtonStyle.secondary)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_index -= 1
-        self.update_buttons()
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        self.index = (self.index - 1) % len(self.images)
+        self.update_embed()
+        await interaction.response.edit_message(embed=self.embed, view=self)
 
-    @discord.ui.button(label="▶️", style=discord.ButtonStyle.secondary, custom_id="next_image")
+    @discord.ui.button(label="Next ▶️", style=discord.ButtonStyle.secondary)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_index += 1
-        self.update_buttons()
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        self.index = (self.index + 1) % len(self.images)
+        self.update_embed()
+        await interaction.response.edit_message(embed=self.embed, view=self)
 
-    def build_embed(self) -> discord.Embed:
-        embed = self.base_embed.copy()
-        embed.set_image(url=self.image_urls[self.current_index])
-        embed.set_footer(text=f"Page {self.current_index + 1}/{self.total} | " + embed.footer.text)
-        return embed
 
 class RedditMirror(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        init_settings()
-        init_stats()
+        self.subreddit_name = os.getenv("REDDIT_SUBREDDIT")
+        self.channel_id = int(os.getenv("REDDIT_CHANNEL_ID"))
+        self.default_min_upvotes = 20
 
-        self.reddit = asyncpraw.Reddit(
-            client_id=os.getenv("REDDIT_CLIENT_ID"),
-            client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
-            username=os.getenv("REDDIT_USERNAME"),
-            password=os.getenv("REDDIT_PASSWORD"),
-            user_agent=os.getenv("REDDIT_USER_AGENT")
-        )
-        self.subreddit_name = os.getenv("REDDIT_SUBREDDIT", "duneawakening")
+        try:
+            self.reddit = praw.Reddit(
+                client_id=os.getenv("REDDIT_CLIENT_ID"),
+                client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
+                username=os.getenv("REDDIT_USERNAME"),
+                password=os.getenv("REDDIT_PASSWORD"),
+                user_agent=os.getenv("REDDIT_USER_AGENT")
+            )
+        except Exception as e:
+            print(f"[RedditMirror] PRAW initialization failed: {e}")
+            self.reddit = None
+
         self.posted_ids = set()
-
-        # Start the background loop
-        self.mirror_posts.start()
+        self.check_reddit.start()
 
     def cog_unload(self):
-        self.mirror_posts.cancel()
+        self.check_reddit.cancel()
 
-    async def is_already_sent(self, channel: discord.TextChannel, title: str) -> bool:
-        async for message in channel.history(limit=200):
-            if message.embeds:
-                for embed in message.embeds:
-                    if embed.title == title:
-                        return True
-        return False
+    def get_min_upvotes(self):
+        return get_config("reddit_min_upvotes") or self.default_min_upvotes
 
-    def extract_image_urls(self, submission) -> list:
-        """
-        Collect all image URLs: gallery → preview → single‐image fallback.
-        """
-        urls = []
-
-        # 1) Gallery
-        if getattr(submission, "is_gallery", False) and hasattr(submission, "media_metadata"):
+    def extract_gallery_images(self, submission) -> list[str]:
+        images = []
+        if hasattr(submission, "media_metadata"):
             try:
-                for item in submission.media_metadata.values():
-                    if "s" in item and "u" in item["s"]:
-                        urls.append(item["s"]["u"].replace("&amp;", "&"))
-            except Exception:
-                pass
+                for item in submission.gallery_data["items"]:
+                    media_id = item["media_id"]
+                    meta = submission.media_metadata[media_id]
+                    url = meta["s"]["u"].replace("&amp;", "&")
+                    images.append(url)
+            except Exception as e:
+                print(f"[RedditMirror] Failed to parse gallery: {e}")
+        return images
 
-        # 2) Preview images
-        elif getattr(submission, "preview", None):
-            try:
-                for image in submission.preview.get("images", []):
-                    src = image.get("source", {})
-                    if "url" in src:
-                        urls.append(src["url"].replace("&amp;", "&"))
-            except Exception:
-                pass
+    def create_embed_from_submission(self, submission, image_override=None):
+        title = submission.title
+        url = submission.url
+        post_url = f"https://reddit.com{submission.permalink}"
 
-        # 3) Fallback for single‐image posts
-        elif getattr(submission, "post_hint", None) == "image" and submission.url.endswith((".jpg", ".jpeg", ".png", ".gif")):
-            urls.append(submission.url)
-
-        return urls
-
-    async def send_embed_with_images(self, channel: discord.TextChannel, submission, interaction: Interaction = None):
         embed = discord.Embed(
-            title=submission.title,
-            url=f"https://reddit.com{submission.permalink}",
-            description=(submission.selftext[:300] + "..." if submission.selftext else None),
+            title=title,
+            url=post_url,
             color=discord.Color.orange()
         )
-        embed.set_author(name=f"r/{self.subreddit_name}")
-        embed.set_footer(text=f"Posted by u/{submission.author} | 👍 {submission.score}")
+        embed.set_author(name=f"Reddit /r/{self.subreddit_name}")
+        embed.set_footer(text=f"Posted by u/{submission.author}")
 
-        image_urls = self.extract_image_urls(submission)
+        if submission.selftext and len(submission.selftext) < 1024:
+            embed.description = submission.selftext
 
-        if image_urls:
-            if len(image_urls) > 1:
-                embed.set_image(url=image_urls[0])
-                view = ImagePaginator(embed, image_urls)
-                if interaction:
-                    await interaction.response.defer()
-                    await interaction.followup.send(embed=embed, view=view)
-                else:
-                    await channel.send(embed=embed, view=view)
-            else:
-                embed.set_image(url=image_urls[0])
-                if interaction:
-                    await interaction.response.send_message(embed=embed)
-                else:
-                    await channel.send(embed=embed)
-        else:
-            # No images
-            if interaction:
-                await interaction.response.send_message(embed=embed)
-            else:
-                await channel.send(embed=embed)
+        if image_override:
+            embed.set_image(url=image_override)
+        elif url.lower().endswith((".jpg", ".png", ".gif", ".jpeg", ".webp")):
+            embed.set_image(url=url)
 
-    @tasks.loop(minutes=2.0)
-    async def mirror_posts(self):
-        await self.bot.wait_until_ready()
+        return embed
 
-        config_enabled = bool(int(get_setting("reddit_enabled", 1)))
-        if not config_enabled:
+    @tasks.loop(minutes=1.5)
+    async def check_reddit(self):
+        if not get_config("reddit_enabled"):
             return
 
-        channel_id = int(get_setting("reddit_channel_id", 0) or 0)
-        if channel_id == 0:
-            return  # No channel set
-
-        channel = self.bot.get_channel(channel_id)
-        if not channel:
-            print(f"❌ Could not find Reddit channel ID {channel_id}")
+        if self.reddit is None:
             return
 
-        subreddit = await self.reddit.subreddit(self.subreddit_name)
+        try:
+            subreddit = self.reddit.subreddit(self.subreddit_name)
+            submissions = list(subreddit.new(limit=5))
+        except Exception as e:
+            print(f"[RedditMirror] Failed to fetch subreddit posts: {e}")
+            return
 
-        async for submission in subreddit.new(limit=5):
+        channel = self.bot.get_channel(self.channel_id)
+        if channel is None or not isinstance(channel, discord.TextChannel):
+            return
+
+        min_upvotes = self.get_min_upvotes()
+
+        for submission in submissions:
             if submission.id in self.posted_ids:
                 continue
-
-            await submission.load()
-            if submission.score < 20:
-                continue
-
-            if await self.is_already_sent(channel, submission.title):
+            if submission.score < min_upvotes:
                 continue
 
             self.posted_ids.add(submission.id)
-            await self.send_embed_with_images(channel, submission)
 
-    @mirror_posts.before_loop
-    async def before_mirror_posts(self):
+            if getattr(submission, "is_gallery", False):
+                images = self.extract_gallery_images(submission)
+                if not images:
+                    continue
+                embed = self.create_embed_from_submission(submission, image_override=images[0])
+                view = RedditGalleryView(images, embed, f"Posted by u/{submission.author}")
+                try:
+                    await channel.send(embed=embed, view=view)
+                except Exception as e:
+                    print(f"[RedditMirror] Failed to send gallery post {submission.id}: {e}")
+            else:
+                embed = self.create_embed_from_submission(submission)
+                try:
+                    await channel.send(embed=embed)
+                except Exception as e:
+                    print(f"[RedditMirror] Failed to send embed for {submission.id}: {e}")
+
+    @check_reddit.before_loop
+    async def before_check_reddit(self):
         await self.bot.wait_until_ready()
 
-    @app_commands.command(
-        name="reddit_latest",
-        description="Fetch the newest r/duneawakening post (≥20 upvotes)."
-    )
+    @app_commands.command(name="reddit_latest", description="Post the latest Reddit post that meets the upvote threshold.")
     async def reddit_latest(self, interaction: discord.Interaction):
-        try:
-            subreddit = await self.reddit.subreddit(self.subreddit_name)
-            found = None
-            async for post in subreddit.new(limit=10):
-                await post.load()
-                if post.score >= 20:
-                    found = post
-                    break
+        await interaction.response.defer()
 
-            if not found:
-                await interaction.response.send_message(
-                    "⚠️ No recent post with at least 20 upvotes found.",
-                    ephemeral=False
-                )
+        if self.reddit is None:
+            await interaction.followup.send("❌ Reddit API not initialized.")
+            return
+
+        subreddit = self.reddit.subreddit(self.subreddit_name)
+        min_upvotes = self.get_min_upvotes()
+
+        try:
+            for submission in subreddit.new(limit=10):
+                if submission.score < min_upvotes:
+                    continue
+
+                if getattr(submission, "is_gallery", False):
+                    images = self.extract_gallery_images(submission)
+                    if not images:
+                        continue
+                    embed = self.create_embed_from_submission(submission, image_override=images[0])
+                    view = RedditGalleryView(images, embed, f"Posted by u/{submission.author}")
+                    await interaction.followup.send(embed=embed, view=view)
+                else:
+                    embed = self.create_embed_from_submission(submission)
+                    await interaction.followup.send(embed=embed)
                 return
 
-            await self.send_embed_with_images(interaction.channel, found, interaction=interaction)
-
+            await interaction.followup.send("❌ No recent posts meet the upvote threshold.")
         except Exception as e:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
-            else:
-                await interaction.followup.send(f"❌ Error: `{e}`")
-            raise
+            await interaction.followup.send(f"❌ Failed to fetch Reddit posts: {e}")
 
-    async def cog_load(self):
-        """
-        Ensure slash command is registered to the guild on load.
-        """
-        guild_id = os.getenv("GUILD_ID")
-        if guild_id:
-            guild_obj = discord.Object(id=int(guild_id))
-            # If /reddit_latest isn't already in this guild, add it
-            if not any(cmd.name == "reddit_latest" for cmd in self.bot.tree.get_commands(guild=guild_obj)):
-                self.bot.tree.add_command(self.reddit_latest, guild=guild_obj)
 
-async def setup(bot: commands.Bot):
+async def setup(bot):
     await bot.add_cog(RedditMirror(bot))

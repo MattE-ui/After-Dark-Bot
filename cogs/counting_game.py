@@ -1,112 +1,94 @@
+# cogs/counting_game.py
+
 import discord
 from discord.ext import commands
-from cogs.config_store import (
-    init_settings,
-    get_setting,
-    set_setting
-)
-from cogs.stats_store import (
-    init_stats,
-    get_stat,
-    set_stat,
-    increment_stat,
-    get_user_stat,
-    set_user_stat,
-    increment_user_stat,
-)
+from discord import app_commands
+
+from database.config_store import get_config, set_config
+from database.stats_store import get_user_stat, increment_user_stat
 
 class CountingGame(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        init_settings()
-        init_stats()
-        self.last_user_id = None
+
+        # Updated emoji cycle
+        self.EMOJI_CYCLE = ["✅", "☑️", "🔥", "❤️‍🔥", "🌟"]
+
+    def get_cycle_emoji(self, count: int) -> str:
+        index = (count // 100) % len(self.EMOJI_CYCLE)
+        return self.EMOJI_CYCLE[index]
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot or not message.guild:
+        if message.author.bot:
             return
 
-        counting_channel_id = int(get_setting("counting_channel_id", 0) or 0)
-        if message.channel.id != counting_channel_id:
+        counting_channel_id = get_config("counting_channel_id")
+        if not counting_channel_id or message.channel.id != int(counting_channel_id):
             return
 
-        if bool(int(get_setting("counting_paused", 0) or 0)):
+        if get_config("counting_paused"):
             return
 
-        allow_chat = bool(int(get_setting("allow_chat_between_counts", 0) or 0))
-        current_count = int(get_setting("current_count", 0) or 0)
-
+        allow_chat = get_config("allow_chat_between_counts") or False
         content = message.content.strip()
-        if not content.isdigit():
-            if not allow_chat and current_count != 0:
-                await self.fail(message.channel, message.author, "sent a non-number!")
+
+        if not content.isdigit() and not allow_chat:
+            await message.delete()
             return
 
-        number = int(content)
+        if content.isdigit():
+            user_id = message.author.id
+            current_count = get_config("current_count") or 0
+            expected_count = current_count + 1
+            last_user_id = get_config("last_counter_id")
 
-        if current_count == 0:
-            if number == 1:
-                self.last_user_id = message.author.id
-                set_setting("current_count", 1)
-                await self.react_to_count(message, 1)
-                increment_stat("total_counts")
-                increment_user_stat("personal_count", message.author.id)
-                set_user_stat("high", message.author.id, 1)
-                if get_stat("high_count", 0) < 1:
-                    set_stat("high_count", 1)
-                return
-            else:
-                await self.fail(message.channel, message.author, f"started with **{number}** instead of **1**.")
+            try:
+                user_count = int(content)
+            except ValueError:
                 return
 
-        expected = current_count + 1
+            if user_count != expected_count or user_id == last_user_id:
+                await message.add_reaction("💥")
+                await message.channel.send(
+                    f"❌ {message.author.mention} broke the count at `{user_count}`. Start again from 1!",
+                    delete_after=6
+                )
+                set_config("current_count", 0)
+                set_config("last_counter_id", None)
+                return
 
-        if message.author.id == self.last_user_id:
-            await self.fail(message.channel, message.author, "counted twice in a row!")
-            return
+            # ✅ Correct count
+            reaction_emoji = self.get_cycle_emoji(expected_count)
+            await message.add_reaction(reaction_emoji)
 
-        if number != expected:
-            await self.fail(message.channel, message.author, f"counted **{number}**, expected **{expected}**.")
-            return
+            set_config("current_count", user_count)
+            set_config("last_counter_id", user_id)
+            increment_user_stat(user_id, "counting_score")
 
-        self.last_user_id = message.author.id
-        set_setting("current_count", expected)
+            # 🎉 Celebration message on each 100th count
+            if user_count % 100 == 0:
+                await message.channel.send(
+                    f"🎉 Congratulations! We've hit **{user_count}**! Keep it going! 🎉",
+                    delete_after=10
+                )
 
-        await self.react_to_count(message, expected)
+    @app_commands.command(name="pause_counting", description="(ADMIN ONLY) Pause the counting game.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def pause_counting(self, interaction: discord.Interaction):
+        set_config("counting_paused", True)
+        await interaction.response.send_message("⏸️ Counting has been paused.", ephemeral=True)
 
-        increment_stat("total_counts")
-        increment_user_stat("personal_count", message.author.id)
+    @app_commands.command(name="resume_counting", description="(ADMIN ONLY) Resume the counting game.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def resume_counting(self, interaction: discord.Interaction):
+        set_config("counting_paused", False)
+        await interaction.response.send_message("▶️ Counting has been resumed.", ephemeral=True)
 
-        if expected > get_user_stat("high", message.author.id, 0):
-            set_user_stat("high", message.author.id, expected)
+    @app_commands.command(name="counting_stats", description="Show your total counting score.")
+    async def counting_stats(self, interaction: discord.Interaction):
+        score = get_user_stat(interaction.user.id, "counting_score")
+        await interaction.response.send_message(f"🧮 {interaction.user.mention}, your counting score is `{score}`!")
 
-        if expected > get_stat("high_count", 0):
-            set_stat("high_count", expected)
-
-    async def fail(self, channel: discord.TextChannel, user: discord.User, reason: str):
-        await channel.send(f"❌ {user.mention} {reason} Count reset to 0.")
-        set_setting("current_count", 0)
-        self.last_user_id = None
-        increment_user_stat("fail", user.id)
-
-    async def react_to_count(self, message: discord.Message, count: int):
-        # React based on count ranges
-        if count % 100 == 0:
-            await message.add_reaction("🎉")
-            await message.channel.send(f"🎉 Milestone! We've reached **{count}**!")
-        else:
-            rem = count % 500
-            if rem < 100:
-                await message.add_reaction("✅")
-            elif rem < 200:
-                await message.add_reaction("☑️")
-            elif rem < 300:
-                await message.add_reaction("🔥")
-            elif rem < 400:
-                await message.add_reaction("❤️‍🔥")
-            else:
-                await message.add_reaction("🌟")
-
-async def setup(bot: commands.Bot):
+async def setup(bot):
     await bot.add_cog(CountingGame(bot))

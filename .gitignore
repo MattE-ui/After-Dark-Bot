@@ -1,6 +1,17 @@
-.env
+# Ignore Python cache
 __pycache__/
-config.json
-counting_stats.json
 *.pyc
-*.log
+
+# Ignore environment and secret config
+.env
+settings.db
+
+# Ignore virtual environment folders
+venv/
+.env/
+.venv/
+
+# Optional: editor-specific files
+.vscode/
+.idea/
+.DS_Store
