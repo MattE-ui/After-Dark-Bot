@@ -93,15 +93,26 @@ class CountingGame(commands.Cog):
     @app_commands.command(
     name="set_count",
     description="(ADMIN ONLY) Manually set the current counting number."
-    )
+)
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(value="The number to set as the current count")
     async def set_count(self, interaction: discord.Interaction, value: int):
         if value < 0:
-            return await interaction.response.send_message("❌ Count must be 0 or higher.")
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Count must be 0 or higher.", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ Count must be 0 or higher.", ephemeral=True)
+            return
 
         set_config("current_count", value)
-        await interaction.response.send_message(f"✅ The count has been set to `{value}`. Continue counting from here!")
+        set_config("last_counter_id", None)
+
+        msg = f"✅ The count has been set to `{value}`. Continue counting from here!"
+        if not interaction.response.is_done():
+            await interaction.response.send_message(msg)
+        else:
+            await interaction.followup.send(msg)
+
 
 async def setup(bot):
     await bot.add_cog(CountingGame(bot))
