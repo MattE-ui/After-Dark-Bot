@@ -100,7 +100,7 @@ class CountingGame(commands.Cog):
         if value < 0:
             return await interaction.response.send_message("❌ Count must be 0 or higher.")
 
-        set_global_stat("counting_current", value)
+        set_config("current_count", value)
         await interaction.response.send_message(f"✅ The count has been set to `{value}`. Continue counting from here!")
 
 async def setup(bot):
