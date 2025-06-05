@@ -6,6 +6,8 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 from database.stats_store import init_stats_db
+from keep_alive import keep_alive
+
 init_stats_db()
 
 load_dotenv()
@@ -55,6 +57,7 @@ async def setup_hook():
         except Exception as e:
             print(f"❌ Failed to load cog {file.stem}: {e}")
 
+keep_alive()
 
 if __name__ == "__main__":
     bot.run(TOKEN)
